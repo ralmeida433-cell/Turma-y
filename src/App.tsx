@@ -242,7 +242,7 @@ export default function App() {
     return { total, presentCount, absentCount, percentage };
   }, [presence]);
 
-  const copyToWhatsApp = () => {
+  const copyToWhatsApp = async () => {
     const presentList = MILITARY_MEMBERS
       .filter(m => presence[m.id])
       .map((m, i) => `${i + 1}- Nº PM: ${m.re} | ${m.name} ${m.role ? `(${m.role})` : ''} *${m.code}*`)
@@ -256,10 +256,34 @@ export default function App() {
     const text = `*PRESENÇA TURMA Y*\n*Data:* ${new Date().toLocaleDateString('pt-BR')}\n\n*RESUMO:*\n✅ *Presentes:* ${stats.presentCount}\n❌ *Ausentes:* ${stats.absentCount}\n📊 *Total:* ${stats.total}\n\n*LISTA DE PRESENTES:*\n${presentList || '_Nenhum militar presente._'}\n\n*LISTA DE AUSENTES:*\n${absentList || '_Nenhum militar ausente._'}`;
     
     const encodedText = encodeURIComponent(text);
-    window.open(`https://wa.me/?text=${encodedText}`, '_blank');
     
-    // Also copy to clipboard as fallback
-    navigator.clipboard.writeText(text);
+    // Try to copy to clipboard first (with fallback)
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        throw new Error('Clipboard API unavailable');
+      }
+    } catch (err) {
+      console.warn('Clipboard API failed, using fallback:', err);
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      textArea.style.top = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+      } catch (copyErr) {
+        console.error('Fallback copy failed:', copyErr);
+      }
+      document.body.removeChild(textArea);
+    }
+
+    // Open WhatsApp
+    window.open(`https://wa.me/?text=${encodedText}`, '_blank');
   };
 
   return (
