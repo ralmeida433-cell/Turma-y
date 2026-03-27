@@ -1,0 +1,22 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidAttendance(data) {
+      return data.keys().hasAll(['present', 'updatedAt']) &&
+             data.present is bool &&
+             data.updatedAt is timestamp;
+    }
+
+    match /attendance/{memberId} {
+      // Allow read and write for authenticated users
+      // For a "Google Sheets" like experience, we allow anyone authenticated to update any member
+      allow read: if true; // Publicly readable for now to avoid complexity
+      allow write: if isAuthenticated() && isValidAttendance(request.resource.data);
+    }
+  }
+}

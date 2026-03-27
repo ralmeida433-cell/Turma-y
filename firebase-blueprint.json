@@ -1,0 +1,27 @@
+{
+  "entities": {
+    "Attendance": {
+      "title": "Attendance",
+      "description": "Presence status for a military member",
+      "type": "object",
+      "properties": {
+        "present": {
+          "type": "boolean",
+          "description": "Whether the member is present"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last time the status was updated"
+        }
+      },
+      "required": ["present", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/attendance/{memberId}": {
+      "schema": "Attendance",
+      "description": "Collection of attendance records indexed by member ID"
+    }
+  }
+}
