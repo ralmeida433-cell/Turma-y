@@ -9,6 +9,14 @@
           "type": "boolean",
           "description": "Whether the member is present"
         },
+        "funcao": {
+          "type": "string",
+          "description": "Function of the member"
+        },
+        "telefone": {
+          "type": "string",
+          "description": "Phone number of the member"
+        },
         "updatedAt": {
           "type": "string",
           "format": "date-time",
@@ -19,9 +27,9 @@
     }
   },
   "firestore": {
-    "/attendance/{memberId}": {
+    "/turmas/{turmaId}/attendance/{memberId}": {
       "schema": "Attendance",
-      "description": "Collection of attendance records indexed by member ID"
+      "description": "Collection of attendance records for each turma, indexed by member ID"
     }
   }
 }

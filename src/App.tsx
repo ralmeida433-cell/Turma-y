@@ -13,10 +13,16 @@ import {
   LayoutGrid,
   List as ListIcon,
   Info,
-  AlertTriangle
+  AlertTriangle,
+  ChevronDown,
+  Edit2,
+  Phone,
+  MessageCircle,
+  X,
+  Plus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { MILITARY_MEMBERS } from './constants';
+import { TURMAS, MilitaryMember } from './data/turmas';
 import { cn } from './lib/utils';
 import { db, auth } from './firebase';
 import { 
@@ -89,13 +95,38 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
 }
 
 export default function App() {
+  const [selectedTurmaId, setSelectedTurmaId] = useState('Y');
   const [searchTerm, setSearchTerm] = useState('');
-  const [presence, setPresence] = useState<Record<number, boolean>>({});
+  const [presence, setPresence] = useState<Record<number, { present: boolean, funcao?: string, telefone?: string, warName?: string }>>({});
   const [filter, setFilter] = useState<'all' | 'present' | 'absent'>('all');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [user, setUser] = useState<any>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingMember, setEditingMember] = useState<MilitaryMember | null>(null);
+  const [editForm, setEditForm] = useState<{ name: string, warName: string, funcao: string, code: string, telefone: string }>({ name: '', warName: '', funcao: '', code: '', telefone: '' });
+
+  // Initialize edit form when opening modal
+  useEffect(() => {
+    if (editingMember) {
+      setEditForm({
+        name: editingMember.name,
+        warName: presence[editingMember.id]?.warName || editingMember.warName || '',
+        funcao: presence[editingMember.id]?.funcao || editingMember.role || '',
+        code: editingMember.code,
+        telefone: presence[editingMember.id]?.telefone || editingMember.phone || ''
+      });
+    }
+  }, [editingMember]); // Only run when opening the modal
+
+  const FUNCTIONS = [
+    'P1', 'AUX DE P1', 'P2', 'AUX DE P2', 'P3', 'AUX DE P3', 
+    'P4', 'AUX DE P4', 'XERIFE', 'SUB XERIFE', 'TCA', 'AUX DE TCA', 
+    'P5', 'AUX DE P5', 'OUTRAS'
+  ];
+
+  const currentTurma = useMemo(() => TURMAS[selectedTurmaId], [selectedTurmaId]);
+  const MILITARY_MEMBERS = currentTurma.members;
 
   // Initialize Auth
   useEffect(() => {
@@ -152,33 +183,65 @@ export default function App() {
 
   // Real-time Sync
   useEffect(() => {
-    if (!isAuthReady) return;
+    if (!isAuthReady || !user) return;
 
-    const path = 'attendance';
+    const path = `turmas/${selectedTurmaId}/attendance`;
     const unsubscribe = onSnapshot(collection(db, path), (snapshot) => {
-      const newPresence: Record<number, boolean> = {};
+      const newPresence: Record<number, { present: boolean, funcao?: string, telefone?: string, warName?: string }> = {};
       snapshot.docs.forEach((doc) => {
-        newPresence[Number(doc.id)] = doc.data().present;
+        const data = doc.data();
+        newPresence[Number(doc.id)] = {
+          present: data.present,
+          funcao: data.funcao,
+          telefone: data.telefone,
+          warName: data.warName
+        };
       });
       setPresence(newPresence);
     }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, path);
+      console.error("Erro de sincronização em tempo real:", err);
     });
 
     return () => unsubscribe();
-  }, [isAuthReady]);
+  }, [isAuthReady, user, selectedTurmaId]);
 
   const togglePresence = async (id: number) => {
     if (!user) return;
     
-    const path = `attendance/${id}`;
-    const isCurrentlyPresent = !!presence[id];
+    const path = `turmas/${selectedTurmaId}/attendance/${id}`;
+    const currentData = presence[id] || {};
+    const isCurrentlyPresent = !!currentData?.present;
+    
+    // Remove undefined values to prevent Firestore errors
+    const cleanData = Object.fromEntries(
+      Object.entries(currentData).filter(([_, v]) => v !== undefined)
+    );
     
     try {
-      await setDoc(doc(db, 'attendance', String(id)), {
+      await setDoc(doc(db, 'turmas', selectedTurmaId, 'attendance', String(id)), {
+        ...cleanData,
         present: !isCurrentlyPresent,
         updatedAt: serverTimestamp()
-      });
+      }, { merge: true });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, path);
+    }
+  };
+
+  const saveMemberDetails = async (id: number, details: { funcao?: string, telefone?: string, warName?: string }) => {
+    if (!user) return;
+    const path = `turmas/${selectedTurmaId}/attendance/${id}`;
+    
+    // Remove undefined values to prevent Firestore errors
+    const cleanDetails = Object.fromEntries(
+      Object.entries(details).filter(([_, v]) => v !== undefined)
+    );
+    
+    try {
+      await setDoc(doc(db, 'turmas', selectedTurmaId, 'attendance', String(id)), {
+        ...cleanDetails,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, path);
     }
@@ -187,14 +250,13 @@ export default function App() {
   const selectAll = async () => {
     if (!user) return;
     
-    // In a real app, we might want to use a batch, but for simplicity:
     for (const member of MILITARY_MEMBERS) {
-      if (!presence[member.id]) {
+      if (!presence[member.id]?.present) {
         try {
-          await setDoc(doc(db, 'attendance', String(member.id)), {
+          await setDoc(doc(db, 'turmas', selectedTurmaId, 'attendance', String(member.id)), {
             present: true,
             updatedAt: serverTimestamp()
-          });
+          }, { merge: true });
         } catch (err) {
           console.error(`Error selecting ${member.id}:`, err);
         }
@@ -206,12 +268,12 @@ export default function App() {
     if (!user) return;
     
     for (const member of MILITARY_MEMBERS) {
-      if (presence[member.id]) {
+      if (presence[member.id]?.present) {
         try {
-          await setDoc(doc(db, 'attendance', String(member.id)), {
+          await setDoc(doc(db, 'turmas', selectedTurmaId, 'attendance', String(member.id)), {
             present: false,
             updatedAt: serverTimestamp()
-          });
+          }, { merge: true });
         } catch (err) {
           console.error(`Error clearing ${member.id}:`, err);
         }
@@ -221,11 +283,13 @@ export default function App() {
 
   const filteredMembers = useMemo(() => {
     return MILITARY_MEMBERS.filter(member => {
+      const activeWarName = presence[member.id]?.warName || member.warName;
       const matchesSearch = member.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                           activeWarName.toLowerCase().includes(searchTerm.toLowerCase()) ||
                            member.re.includes(searchTerm) ||
                            member.code.includes(searchTerm);
       
-      const isPresent = presence[member.id];
+      const isPresent = presence[member.id]?.present;
       const matchesFilter = filter === 'all' || 
                            (filter === 'present' && isPresent) || 
                            (filter === 'absent' && !isPresent);
@@ -236,7 +300,8 @@ export default function App() {
 
   const stats = useMemo(() => {
     const total = MILITARY_MEMBERS.length;
-    const presentCount = Object.values(presence).filter(Boolean).length;
+    const values = Object.values(presence) as { present: boolean }[];
+    const presentCount = values.filter(p => p.present).length;
     const absentCount = total - presentCount;
     const percentage = Math.round((presentCount / total) * 100);
     return { total, presentCount, absentCount, percentage };
@@ -244,16 +309,31 @@ export default function App() {
 
   const copyToWhatsApp = async () => {
     const presentList = MILITARY_MEMBERS
-      .filter(m => presence[m.id])
-      .map((m, i) => `${i + 1}- Nº PM: ${m.re} | ${m.name} ${m.role ? `(${m.role})` : ''} *${m.code}*`)
+      .filter(m => presence[m.id]?.present)
+      .map((m, i) => {
+        const p = presence[m.id];
+        const role = p?.funcao;
+        const activeWarName = p?.warName || m.warName;
+        const nameWithBoldWarName = activeWarName 
+          ? m.name.replace(new RegExp(`(${activeWarName})`, 'gi'), '*$1*') 
+          : m.name;
+        return `${i + 1}- Nº PM: ${m.re} | ${nameWithBoldWarName} ${role ? `(${role})` : ''} *${m.code}*`;
+      })
       .join('\n');
     
     const absentList = MILITARY_MEMBERS
-      .filter(m => !presence[m.id])
-      .map((m, i) => `${i + 1}- ${m.name}`)
+      .filter(m => !presence[m.id]?.present)
+      .map((m, i) => {
+        const p = presence[m.id];
+        const activeWarName = p?.warName || m.warName;
+        const nameWithBoldWarName = activeWarName 
+          ? m.name.replace(new RegExp(`(${activeWarName})`, 'gi'), '*$1*') 
+          : m.name;
+        return `${i + 1}- ${nameWithBoldWarName}`;
+      })
       .join('\n');
 
-    const text = `*PRESENÇA TURMA Y*\n*Data:* ${new Date().toLocaleDateString('pt-BR')}\n\n*RESUMO:*\n✅ *Presentes:* ${stats.presentCount}\n❌ *Ausentes:* ${stats.absentCount}\n📊 *Total:* ${stats.total}\n\n*LISTA DE PRESENTES:*\n${presentList || '_Nenhum militar presente._'}\n\n*LISTA DE AUSENTES:*\n${absentList || '_Nenhum militar ausente._'}`;
+    const text = `*PRESENÇA ${currentTurma.name.toUpperCase()}*\n*Data:* ${new Date().toLocaleDateString('pt-BR')}\n\n*RESUMO:*\n✅ *Presentes:* ${stats.presentCount}\n❌ *Ausentes:* ${stats.absentCount}\n📊 *Total:* ${stats.total}\n\n*LISTA DE PRESENTES:*\n${presentList || '_Nenhum militar presente._'}\n\n*LISTA DE AUSENTES:*\n${absentList || '_Nenhum militar ausente._'}`;
     
     const encodedText = encodeURIComponent(text);
     
@@ -304,15 +384,16 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="bg-[#F27D26] p-2 rounded-xl shadow-lg">
+              <div className="bg-[#F27D26] p-2 rounded-xl shadow-lg shrink-0">
                 <ShieldCheck className="w-6 h-6 text-white" />
               </div>
-              <div className="hidden sm:block">
-                <h1 className="text-xl font-black tracking-tight uppercase">Turma Y</h1>
-                <p className="text-blue-200 text-[10px] font-bold uppercase tracking-widest opacity-80">Controle de Presença</p>
-              </div>
-              <div className="sm:hidden">
-                <h1 className="text-lg font-black uppercase">Turma Y</h1>
+              <div className="flex flex-col">
+                <h1 className="text-white font-black uppercase text-xl md:text-2xl tracking-tight leading-none">
+                  {currentTurma.name}
+                </h1>
+                <span className="text-[10px] text-white/50 font-bold uppercase tracking-widest mt-1">
+                  Controle de Presença
+                </span>
               </div>
             </div>
 
@@ -397,15 +478,25 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-6">
         {/* Search & Quick Actions */}
         <div className="space-y-4 mb-8">
-          <div className="relative group">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-[#F27D26] transition-colors" />
-            <input
-              type="text"
-              placeholder="Buscar por nome, RE ou código..."
-              className="w-full pl-12 pr-4 py-4 bg-white border-none rounded-2xl shadow-sm focus:ring-2 focus:ring-[#F27D26] transition-all outline-none text-base font-medium placeholder:text-gray-400"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
+          <div className="flex gap-2">
+            <div className="relative group flex-1">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-[#F27D26] transition-colors" />
+              <input
+                type="text"
+                placeholder="Buscar por nome, RE ou código..."
+                className="w-full pl-12 pr-4 py-4 bg-white border-none rounded-2xl shadow-sm focus:ring-2 focus:ring-[#F27D26] transition-all outline-none text-base font-medium placeholder:text-gray-400"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+            <button 
+              onClick={() => {
+                // Logic to add a new student
+              }}
+              className="p-4 bg-[#F27D26] text-white rounded-2xl shadow-sm hover:bg-[#d66d1e] transition-all"
+            >
+              <Plus className="w-6 h-6" />
+            </button>
           </div>
           
           <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar pb-2">
@@ -460,13 +551,12 @@ export default function App() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                onClick={() => togglePresence(member.id)}
                 className={cn(
-                  "group relative transition-all duration-200 select-none active:scale-[0.98] cursor-pointer",
+                  "group relative transition-all duration-200 select-none active:scale-[0.98]",
                   viewMode === 'grid' 
                     ? "p-5 rounded-[2rem] border-2" 
                     : "p-4 rounded-2xl border-l-4",
-                  presence[member.id]
+                  presence[member.id]?.present
                     ? "bg-white border-green-500 shadow-lg shadow-green-500/5"
                     : "bg-white border-transparent hover:border-gray-200 shadow-sm"
                 )}
@@ -475,42 +565,80 @@ export default function App() {
                   "flex items-center justify-between",
                   viewMode === 'grid' ? "flex-col items-start gap-4" : "flex-row"
                 )}>
-                  <div className="flex items-center gap-3">
-                    <div className={cn(
-                      "w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300 shrink-0",
-                      presence[member.id] ? "bg-green-500 text-white" : "bg-gray-100 text-gray-400"
-                    )}>
-                      {presence[member.id] ? <CheckCircle2 className="w-6 h-6" /> : <Circle className="w-6 h-6" />}
+                  <div className="flex items-center gap-3 w-full">
+                    <div 
+                      onClick={() => togglePresence(member.id)}
+                      className={cn(
+                        "w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300 shrink-0 cursor-pointer",
+                        presence[member.id]?.present ? "bg-green-500 text-white" : "bg-gray-100 text-gray-400"
+                      )}
+                    >
+                      {presence[member.id]?.present ? <CheckCircle2 className="w-6 h-6" /> : <Circle className="w-6 h-6" />}
                     </div>
-                    <div>
-                      <div className="flex items-center gap-2 mb-0.5">
+                    <div className="flex-1 min-w-0" onClick={() => togglePresence(member.id)}>
+                      <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                         <span className="text-[9px] font-black text-[#F27D26] bg-orange-50 px-1.5 py-0.5 rounded">
                           Nº PM {member.re}
                         </span>
-                        {member.role && (
+                        {(presence[member.id]?.funcao) && (
                           <span className="text-[8px] font-black bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded uppercase">
-                            {member.role}
+                            {presence[member.id]?.funcao}
                           </span>
                         )}
                       </div>
                       <h3 className={cn(
-                        "font-black text-sm md:text-base leading-tight uppercase tracking-tight",
-                        presence[member.id] ? "text-green-900" : "text-gray-800"
+                        "font-medium text-sm md:text-base leading-tight uppercase tracking-tight truncate max-w-[200px] sm:max-w-none",
+                        presence[member.id]?.present ? "text-green-900" : "text-gray-800"
                       )}>
-                        {member.name}
+                        {(() => {
+                          const activeWarName = presence[member.id]?.warName || member.warName;
+                          if (!activeWarName) return <span>{member.name}</span>;
+                          
+                          const parts = member.name.split(new RegExp(`(${activeWarName})`, 'gi'));
+                          return parts.map((part, i) => 
+                            part.toLowerCase() === activeWarName.toLowerCase() ? (
+                              <span key={i} className="font-black text-[#F27D26]">{part}</span>
+                            ) : (
+                              <span key={i}>{part}</span>
+                            )
+                          );
+                        })()}
                       </h3>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-mono font-bold text-gray-400">
+                  <div className={cn(
+                    "flex items-center gap-2 shrink-0",
+                    viewMode === 'grid' ? "w-full justify-end mt-2" : ""
+                  )}>
+                    {(presence[member.id]?.telefone || member.phone) && (
+                      <a 
+                        href={`https://wa.me/${(presence[member.id]?.telefone || member.phone || '').replace(/\D/g, '')}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MessageCircle className="w-4 h-4" />
+                      </a>
+                    )}
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingMember(member);
+                      }}
+                      className="p-2 bg-gray-50 text-gray-500 rounded-lg hover:bg-gray-100 transition-colors"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <span className="text-[10px] font-mono font-bold text-gray-400 ml-2">
                       *{member.code}*
                     </span>
                   </div>
                 </div>
 
                 {/* Status Indicator for List Mode */}
-                {viewMode === 'list' && presence[member.id] && (
+                {viewMode === 'list' && presence[member.id]?.present && (
                   <div className="absolute right-4 top-1/2 -translate-y-1/2">
                     <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.8)]" />
                   </div>
@@ -531,23 +659,24 @@ export default function App() {
         )}
       </main>
 
-      {/* Mobile Bottom Action Bar */}
-      <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-xl border-t border-gray-100 z-50 md:p-6">
-        <div className="max-w-xl mx-auto flex gap-3">
+      {/* Bottom Action Bar */}
+      <div className="fixed bottom-0 left-0 right-0 p-4 bg-white/80 backdrop-blur-xl border-t border-gray-100 z-50 md:p-6 shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
+        <div className="max-w-6xl mx-auto flex justify-center md:justify-end gap-3">
           <button 
             onClick={copyToWhatsApp}
-            className="flex-1 flex items-center justify-center gap-3 bg-green-600 hover:bg-green-700 text-white py-4 rounded-2xl font-black text-xs md:text-sm transition-all active:scale-95 shadow-xl shadow-green-600/20 uppercase tracking-widest"
+            className="flex-1 md:flex-none md:px-8 flex items-center justify-center gap-3 bg-green-600 hover:bg-green-700 text-white py-4 rounded-2xl font-black text-xs md:text-sm transition-all active:scale-95 shadow-xl shadow-green-600/20 uppercase tracking-widest"
           >
             <Share2 className="w-5 h-5" />
-            WhatsApp
+            <span className="hidden sm:inline">Compartilhar no </span>WhatsApp
           </button>
           
           <button 
             onClick={() => window.print()}
-            className="flex items-center justify-center px-6 bg-[#1B2B3A] text-white rounded-2xl transition-all active:scale-95 shadow-xl shadow-blue-900/20"
+            className="flex items-center justify-center px-6 bg-[#1B2B3A] text-white rounded-2xl transition-all active:scale-95 shadow-xl shadow-blue-900/20 hover:bg-[#2a4054]"
             title="Imprimir Relatório"
           >
             <ClipboardCheck className="w-6 h-6" />
+            <span className="hidden sm:inline ml-2 font-bold text-sm uppercase tracking-wider">Imprimir</span>
           </button>
         </div>
       </div>
@@ -569,6 +698,151 @@ export default function App() {
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>
+
+      {/* Edit Modal */}
+      <AnimatePresence>
+        {editingMember && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[150] flex items-center justify-center p-4">
+            <motion.div 
+              key="edit-modal"
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-md rounded-[2.5rem] shadow-2xl overflow-hidden"
+            >
+              <div className="bg-[#1B2B3A] p-6 text-white flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-black uppercase tracking-tight">Editar Militar</h2>
+                  <p className="text-white/50 text-[10px] font-bold uppercase tracking-widest mt-1">{editingMember.name}</p>
+                </div>
+                <button 
+                  onClick={() => setEditingMember(null)}
+                  className="p-2 bg-white/10 rounded-xl hover:bg-white/20 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-8 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nome Completo</label>
+                  <input 
+                    type="text"
+                    className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
+                    value={editForm.name}
+                    onChange={(e) => {
+                      const val = e.target.value.toUpperCase();
+                      setEditForm(prev => ({ ...prev, name: val }));
+                    }}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nome de Guerra</label>
+                  <input 
+                    type="text"
+                    placeholder="Ex: SILVA"
+                    className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
+                    value={editForm.warName}
+                    onChange={(e) => {
+                      const val = e.target.value.toUpperCase();
+                      setEditForm(prev => ({ ...prev, warName: val }));
+                      saveMemberDetails(editingMember.id, { warName: val });
+                    }}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Função</label>
+                  <div className="relative">
+                    <select 
+                      className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all appearance-none"
+                      value={FUNCTIONS.includes(editForm.funcao) ? editForm.funcao : (editForm.funcao ? 'OUTRAS' : '')}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val !== 'OUTRAS') {
+                          setEditForm(prev => ({ ...prev, funcao: val }));
+                          saveMemberDetails(editingMember.id, { funcao: val });
+                        } else {
+                          setEditForm(prev => ({ ...prev, funcao: 'OUTRAS' }));
+                          saveMemberDetails(editingMember.id, { funcao: 'OUTRAS' });
+                        }
+                      }}
+                    >
+                      <option value="">Nenhuma</option>
+                      {FUNCTIONS.map(f => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                  </div>
+                  
+                  {(!FUNCTIONS.includes(editForm.funcao) || editForm.funcao === 'OUTRAS') && (
+                    <input 
+                      type="text"
+                      placeholder="Especifique a função..."
+                      className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all mt-2"
+                      value={editForm.funcao === 'OUTRAS' ? '' : editForm.funcao}
+                      onChange={(e) => {
+                        setEditForm(prev => ({ ...prev, funcao: e.target.value }));
+                        saveMemberDetails(editingMember.id, { funcao: e.target.value });
+                      }}
+                    />
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nº de Curso</label>
+                  <input 
+                    type="text"
+                    className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
+                    value={editForm.code}
+                    onChange={(e) => {
+                      const val = e.target.value.toUpperCase();
+                      setEditForm(prev => ({ ...prev, code: val }));
+                    }}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Telefone (WhatsApp)</label>
+                  <div className="relative">
+                    <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                    <input 
+                      type="tel"
+                      placeholder="(00) 00000-0000"
+                      className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl pl-12 pr-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all"
+                      value={editForm.telefone}
+                      onChange={(e) => {
+                        setEditForm(prev => ({ ...prev, telefone: e.target.value }));
+                        saveMemberDetails(editingMember.id, { telefone: e.target.value });
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-4">
+                  <button 
+                    onClick={() => setEditingMember(null)}
+                    className="flex-1 bg-[#F27D26] text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-orange-500/20 active:scale-95 transition-all"
+                  >
+                    Concluir
+                  </button>
+                  <button 
+                    onClick={() => {
+                      // Logic to delete the member
+                      setEditingMember(null);
+                    }}
+                    className="flex-1 bg-red-500 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-red-500/20 active:scale-95 transition-all"
+                  >
+                    Excluir
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

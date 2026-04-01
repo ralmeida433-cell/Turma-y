@@ -9,13 +9,14 @@ service cloud.firestore {
     function isValidAttendance(data) {
       return data.keys().hasAll(['present', 'updatedAt']) &&
              data.present is bool &&
-             data.updatedAt is timestamp;
+             data.updatedAt is timestamp &&
+             (!('funcao' in data) || data.funcao is string) &&
+             (!('telefone' in data) || data.telefone is string);
     }
 
-    match /attendance/{memberId} {
+    match /turmas/{turmaId}/attendance/{memberId} {
       // Allow read and write for authenticated users
-      // For a "Google Sheets" like experience, we allow anyone authenticated to update any member
-      allow read: if true; // Publicly readable for now to avoid complexity
+      allow read: if true; // Publicly readable for now
       allow write: if isAuthenticated() && isValidAttendance(request.resource.data);
     }
   }
