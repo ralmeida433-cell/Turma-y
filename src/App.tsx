@@ -444,32 +444,61 @@ export default function App() {
   }, [presence]);
 
   const copyToWhatsApp = async () => {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('pt-BR');
+    const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
     const presentList = MILITARY_MEMBERS
       .filter(m => presence[m.id]?.present)
+      .sort((a, b) => Number(a.code) - Number(b.code))
       .map((m, i) => {
         const p = presence[m.id];
-        const role = p?.funcao;
+        const role = p?.funcao || m.role;
         const activeWarName = p?.warName || m.warName;
-        const nameWithBoldWarName = activeWarName 
-          ? m.name.replace(new RegExp(`(${activeWarName})`, 'gi'), '*$1*') 
-          : m.name;
-        return `${i + 1}- Nº PM: ${m.re} | ${nameWithBoldWarName} ${role ? `(${role})` : ''} *${m.code}*`;
+        
+        // Format: 01. [123456] - *SILVA* (JOÃO SILVA) - AUX [01]
+        const index = String(i + 1).padStart(2, '0');
+        const re = m.re ? `[${m.re}]` : '';
+        const warName = activeWarName ? `*${activeWarName.toUpperCase()}*` : '';
+        const fullName = m.name ? `(${m.name.toUpperCase()})` : '';
+        const roleStr = role ? `- ${role.toUpperCase()}` : '';
+        const code = m.code ? `[${m.code}]` : '';
+
+        return `✅ ${index}. ${re} ${warName} ${fullName} ${roleStr} ${code}`;
       })
       .join('\n');
     
     const absentList = MILITARY_MEMBERS
       .filter(m => !presence[m.id]?.present)
+      .sort((a, b) => Number(a.code) - Number(b.code))
       .map((m, i) => {
         const p = presence[m.id];
         const activeWarName = p?.warName || m.warName;
-        const nameWithBoldWarName = activeWarName 
-          ? m.name.replace(new RegExp(`(${activeWarName})`, 'gi'), '*$1*') 
-          : m.name;
-        return `${i + 1}- ${nameWithBoldWarName}`;
+        const index = String(i + 1).padStart(2, '0');
+        const warName = activeWarName ? `*${activeWarName.toUpperCase()}*` : `*${m.name.toUpperCase()}*`;
+        return `❌ ${index}. ${warName}`;
       })
       .join('\n');
 
-    const text = `*PRESENÇA ${currentTurma.name.toUpperCase()}*\n*Data:* ${new Date().toLocaleDateString('pt-BR')}\n\n*RESUMO:*\n✅ *Presentes:* ${stats.presentCount}\n❌ *Ausentes:* ${stats.absentCount}\n📊 *Total:* ${stats.total}\n\n*LISTA DE PRESENTES:*\n${presentList || '_Nenhum militar presente._'}\n\n*LISTA DE AUSENTES:*\n${absentList || '_Nenhum militar ausente._'}`;
+    const text = `*📋 RELATÓRIO DE PRESENÇA - ${currentTurma.name.toUpperCase()}*
+*📅 Data:* ${dateStr}
+*⏰ Hora:* ${timeStr}
+
+*📊 RESUMO ESTATÍSTICO:*
+━━━━━━━━━━━━━━━━━━━━
+✅ *Presentes:* ${stats.presentCount}
+❌ *Ausentes:* ${stats.absentCount}
+📈 *Aproveitamento:* ${stats.percentage}%
+👥 *Efetivo Total:* ${stats.total}
+━━━━━━━━━━━━━━━━━━━━
+
+*✅ LISTA DE PRESENTES:*
+${presentList || '_Nenhum militar presente._'}
+
+*❌ LISTA DE AUSENTES:*
+${absentList || '_Nenhum militar ausente._'}
+
+*Gereciado via App de Presença*`;
     
     const encodedText = encodeURIComponent(text);
     
@@ -612,6 +641,35 @@ export default function App() {
       </div>
 
       <main className="max-w-6xl mx-auto px-4 py-6">
+        {/* Print Only Summary */}
+        <div className="print-only mb-8 p-6 border-2 border-gray-100 rounded-3xl bg-gray-50/50">
+          <div className="flex items-center justify-between mb-6 border-b border-gray-200 pb-4">
+            <h2 className="text-xl font-black text-[#1B2B3A] uppercase tracking-tight">Relatório de Presença</h2>
+            <div className="text-right">
+              <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{currentTurma.name}</p>
+              <p className="text-xs font-bold text-gray-600">{new Date().toLocaleDateString('pt-BR')} - {new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</p>
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-4 gap-4">
+            <div className="text-center p-3 bg-white rounded-2xl border border-gray-100">
+              <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1">Presentes</p>
+              <p className="text-xl font-black text-green-600">{stats.presentCount}</p>
+            </div>
+            <div className="text-center p-3 bg-white rounded-2xl border border-gray-100">
+              <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1">Ausentes</p>
+              <p className="text-xl font-black text-red-600">{stats.absentCount}</p>
+            </div>
+            <div className="text-center p-3 bg-white rounded-2xl border border-gray-100">
+              <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1">Aproveitamento</p>
+              <p className="text-xl font-black text-blue-600">{stats.percentage}%</p>
+            </div>
+            <div className="text-center p-3 bg-white rounded-2xl border border-gray-100">
+              <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1">Total</p>
+              <p className="text-xl font-black text-[#1B2B3A]">{stats.total}</p>
+            </div>
+          </div>
+        </div>
         {/* Search & Quick Actions */}
         <div className="space-y-4 mb-8">
           <div className="flex gap-2">
@@ -703,7 +761,7 @@ export default function App() {
                     <div 
                       onClick={() => togglePresence(member.id)}
                       className={cn(
-                        "w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300 shrink-0 cursor-pointer",
+                        "w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300 shrink-0 cursor-pointer presence-indicator-btn",
                         presence[member.id]?.present ? "bg-green-500 text-white" : "bg-gray-100 text-gray-400"
                       )}
                     >
@@ -742,7 +800,7 @@ export default function App() {
                   </div>
 
                   <div className={cn(
-                    "flex items-center gap-2 shrink-0",
+                    "flex items-center gap-2 shrink-0 no-print",
                     viewMode === 'grid' ? "w-full justify-end mt-2" : ""
                   )}>
                     {(presence[member.id]?.telefone || member.phone) && (
@@ -817,17 +875,50 @@ export default function App() {
 
       <style>{`
         @media print {
-          .fixed, header, .no-print, .bg-white\/80 { display: none !important; }
-          main { padding: 0 !important; max-width: 100% !important; }
+          .fixed, header, .no-print, .bg-white\/80, .bottom-0, .sticky { display: none !important; }
+          main { padding: 0 !important; max-width: 100% !important; margin: 0 !important; }
           .grid { display: block !important; }
+          
           .rounded-2xl, .rounded-\[2rem\] { 
-            border-radius: 4px !important; 
-            border: 1px solid #ddd !important; 
-            margin-bottom: 4px !important; 
-            padding: 8px !important;
+            border-radius: 0 !important; 
+            border: none !important;
+            border-bottom: 1px solid #eee !important;
+            margin-bottom: 0 !important; 
+            padding: 12px 0 !important;
             page-break-inside: avoid; 
+            box-shadow: none !important;
+            background: transparent !important;
           }
-          body { background: white !important; }
+
+          .presence-indicator-btn {
+            border: 1px solid #000 !important;
+            background: transparent !important;
+            color: #000 !important;
+            width: 20px !important;
+            height: 20px !important;
+            border-radius: 4px !important;
+          }
+
+          .presence-indicator-btn svg {
+            width: 14px !important;
+            height: 14px !important;
+          }
+
+          .bg-green-500.presence-indicator-btn {
+            background: #000 !important;
+            color: #fff !important;
+          }
+
+          body { background: white !important; color: black !important; }
+          
+          .print-only { display: block !important; }
+          
+          h3 { font-size: 14px !important; }
+          span { font-size: 10px !important; }
+        }
+        
+        @media screen {
+          .print-only { display: none !important; }
         }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
