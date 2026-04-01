@@ -30,8 +30,12 @@ import {
   doc, 
   onSnapshot, 
   setDoc, 
+  deleteDoc,
   serverTimestamp, 
-  getDocFromServer
+  getDocFromServer,
+  getDocs,
+  query,
+  orderBy
 } from 'firebase/firestore';
 import { 
   GoogleAuthProvider, 
@@ -103,8 +107,13 @@ export default function App() {
   const [user, setUser] = useState<any>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [members, setMembers] = useState<MilitaryMember[]>([]);
   const [editingMember, setEditingMember] = useState<MilitaryMember | null>(null);
-  const [editForm, setEditForm] = useState<{ name: string, warName: string, funcao: string, code: string, telefone: string }>({ name: '', warName: '', funcao: '', code: '', telefone: '' });
+  const [isAddingMember, setIsAddingMember] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [hasLoadedMembers, setHasLoadedMembers] = useState(false);
+  const [editForm, setEditForm] = useState<{ name: string, warName: string, funcao: string, code: string, telefone: string, re: string }>({ name: '', warName: '', funcao: '', code: '', telefone: '', re: '' });
 
   // Initialize edit form when opening modal
   useEffect(() => {
@@ -114,10 +123,13 @@ export default function App() {
         warName: presence[editingMember.id]?.warName || editingMember.warName || '',
         funcao: presence[editingMember.id]?.funcao || editingMember.role || '',
         code: editingMember.code,
-        telefone: presence[editingMember.id]?.telefone || editingMember.phone || ''
+        telefone: presence[editingMember.id]?.telefone || editingMember.phone || '',
+        re: editingMember.re
       });
+    } else if (isAddingMember) {
+      setEditForm({ name: '', warName: '', funcao: '', code: '', telefone: '', re: '' });
     }
-  }, [editingMember]); // Only run when opening the modal
+  }, [editingMember, isAddingMember]); // Only run when opening the modal
 
   const FUNCTIONS = [
     'P1', 'AUX DE P1', 'P2', 'AUX DE P2', 'P3', 'AUX DE P3', 
@@ -126,7 +138,50 @@ export default function App() {
   ];
 
   const currentTurma = useMemo(() => TURMAS[selectedTurmaId], [selectedTurmaId]);
-  const MILITARY_MEMBERS = currentTurma.members;
+  const MILITARY_MEMBERS = hasLoadedMembers ? members : currentTurma.members;
+
+  // Migration and Sync Members
+  useEffect(() => {
+    if (!isAuthReady || !user) return;
+
+    const membersPath = `turmas/${selectedTurmaId}/members`;
+    
+    // Sync members
+    const q = query(collection(db, membersPath), orderBy('code', 'asc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const newMembers: MilitaryMember[] = snapshot.docs.map(doc => ({
+        ...doc.data() as MilitaryMember,
+        id: Number(doc.id)
+      }));
+      setMembers(newMembers);
+      setHasLoadedMembers(true);
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, membersPath);
+    });
+
+    // Migration check (only if we haven't migrated yet)
+    const checkMigration = async () => {
+      try {
+        const snapshot = await getDocs(collection(db, membersPath));
+        // Only migrate if Firestore is empty AND we haven't loaded anything yet
+        if (snapshot.empty) {
+          console.log("Migrating members to Firestore...");
+          for (const member of currentTurma.members) {
+            await setDoc(doc(db, membersPath, String(member.id)), {
+              ...member,
+              createdAt: serverTimestamp()
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Migration error:", err);
+      }
+    };
+
+    checkMigration();
+
+    return () => unsubscribe();
+  }, [isAuthReady, user, selectedTurmaId, currentTurma]);
 
   // Initialize Auth
   useEffect(() => {
@@ -228,22 +283,103 @@ export default function App() {
     }
   };
 
-  const saveMemberDetails = async (id: number, details: { funcao?: string, telefone?: string, warName?: string }) => {
+  const saveMemberDetails = async (id: number, details: any) => {
     if (!user) return;
-    const path = `turmas/${selectedTurmaId}/attendance/${id}`;
-    
-    // Remove undefined values to prevent Firestore errors
-    const cleanDetails = Object.fromEntries(
-      Object.entries(details).filter(([_, v]) => v !== undefined)
-    );
     
     try {
-      await setDoc(doc(db, 'turmas', selectedTurmaId, 'attendance', String(id)), {
-        ...cleanDetails,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
+      // Update in members collection if it's a core detail
+      const coreFields = ['name', 're', 'code', 'warName', 'role', 'phone'];
+      const coreDetails = Object.fromEntries(
+        Object.entries(details).filter(([k]) => coreFields.includes(k))
+      );
+
+      if (Object.keys(coreDetails).length > 0) {
+        await setDoc(doc(db, 'turmas', selectedTurmaId, 'members', String(id)), {
+          ...coreDetails,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+
+      // Update in attendance collection for transient/presence details
+      const attendanceFields = ['funcao', 'telefone', 'warName', 'present'];
+      const attendanceDetails = Object.fromEntries(
+        Object.entries(details).filter(([k]) => attendanceFields.includes(k))
+      );
+
+      if (Object.keys(attendanceDetails).length > 0) {
+        await setDoc(doc(db, 'turmas', selectedTurmaId, 'attendance', String(id)), {
+          ...attendanceDetails,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, path);
+      handleFirestoreError(err, OperationType.WRITE, `turmas/${selectedTurmaId}`);
+    }
+  };
+
+  const addMember = async () => {
+    if (!user) return;
+    setIsProcessing(true);
+    setError(null);
+    const id = Date.now();
+    try {
+      await setDoc(doc(db, 'turmas', selectedTurmaId, 'members', String(id)), {
+        id,
+        name: editForm.name,
+        warName: editForm.warName,
+        re: editForm.re,
+        code: editForm.code,
+        role: editForm.funcao,
+        phone: editForm.telefone,
+        createdAt: serverTimestamp()
+      });
+      setIsAddingMember(false);
+    } catch (err) {
+      setError("Erro ao adicionar militar. Verifique os campos.");
+      console.error(err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const updateMember = async () => {
+    if (!user || !editingMember) return;
+    setIsProcessing(true);
+    setError(null);
+    try {
+      await saveMemberDetails(editingMember.id, {
+        name: editForm.name,
+        warName: editForm.warName,
+        re: editForm.re,
+        code: editForm.code,
+        role: editForm.funcao,
+        phone: editForm.telefone,
+        funcao: editForm.funcao, // Also update attendance
+        telefone: editForm.telefone
+      });
+      setEditingMember(null);
+    } catch (err) {
+      setError("Erro ao atualizar militar.");
+      console.error(err);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const deleteMember = async (id: number) => {
+    if (!user) return;
+    setIsProcessing(true);
+    setError(null);
+    try {
+      await deleteDoc(doc(db, 'turmas', selectedTurmaId, 'members', String(id)));
+      await deleteDoc(doc(db, 'turmas', selectedTurmaId, 'attendance', String(id)));
+      setEditingMember(null);
+      setIsDeleting(false);
+    } catch (err) {
+      setError("Erro ao excluir militar. Verifique sua conexão.");
+      console.error(err);
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -490,9 +626,7 @@ export default function App() {
               />
             </div>
             <button 
-              onClick={() => {
-                // Logic to add a new student
-              }}
+              onClick={() => setIsAddingMember(true)}
               className="p-4 bg-[#F27D26] text-white rounded-2xl shadow-sm hover:bg-[#d66d1e] transition-all"
             >
               <Plus className="w-6 h-6" />
@@ -699,9 +833,9 @@ export default function App() {
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>
 
-      {/* Edit Modal */}
+      {/* Edit/Add Modal */}
       <AnimatePresence>
-        {editingMember && (
+        {(editingMember || isAddingMember) && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[150] flex items-center justify-center p-4">
             <motion.div 
               key="edit-modal"
@@ -712,132 +846,194 @@ export default function App() {
             >
               <div className="bg-[#1B2B3A] p-6 text-white flex items-center justify-between">
                 <div>
-                  <h2 className="text-xl font-black uppercase tracking-tight">Editar Militar</h2>
-                  <p className="text-white/50 text-[10px] font-bold uppercase tracking-widest mt-1">{editingMember.name}</p>
+                  <h2 className="text-xl font-black uppercase tracking-tight">
+                    {isAddingMember ? 'Adicionar Militar' : 'Editar Militar'}
+                  </h2>
+                  <p className="text-white/50 text-[10px] font-bold uppercase tracking-widest mt-1">
+                    {isAddingMember ? 'Novo Registro' : editingMember?.name}
+                  </p>
                 </div>
                 <button 
-                  onClick={() => setEditingMember(null)}
+                  onClick={() => {
+                    setEditingMember(null);
+                    setIsAddingMember(false);
+                    setIsDeleting(false);
+                  }}
                   className="p-2 bg-white/10 rounded-xl hover:bg-white/20 transition-colors"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <div className="p-8 space-y-6">
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nome Completo</label>
-                  <input 
-                    type="text"
-                    className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
-                    value={editForm.name}
-                    onChange={(e) => {
-                      const val = e.target.value.toUpperCase();
-                      setEditForm(prev => ({ ...prev, name: val }));
-                    }}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nome de Guerra</label>
-                  <input 
-                    type="text"
-                    placeholder="Ex: SILVA"
-                    className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
-                    value={editForm.warName}
-                    onChange={(e) => {
-                      const val = e.target.value.toUpperCase();
-                      setEditForm(prev => ({ ...prev, warName: val }));
-                      saveMemberDetails(editingMember.id, { warName: val });
-                    }}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Função</label>
-                  <div className="relative">
-                    <select 
-                      className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all appearance-none"
-                      value={FUNCTIONS.includes(editForm.funcao) ? editForm.funcao : (editForm.funcao ? 'OUTRAS' : '')}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val !== 'OUTRAS') {
-                          setEditForm(prev => ({ ...prev, funcao: val }));
-                          saveMemberDetails(editingMember.id, { funcao: val });
-                        } else {
-                          setEditForm(prev => ({ ...prev, funcao: 'OUTRAS' }));
-                          saveMemberDetails(editingMember.id, { funcao: 'OUTRAS' });
-                        }
-                      }}
-                    >
-                      <option value="">Nenhuma</option>
-                      {FUNCTIONS.map(f => (
-                        <option key={f} value={f}>{f}</option>
-                      ))}
-                    </select>
-                    <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+              <div className="p-8 space-y-6 max-h-[70vh] overflow-y-auto no-scrollbar">
+                {isDeleting ? (
+                  <div className="text-center py-8 space-y-6">
+                    <div className="bg-red-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto">
+                      <AlertTriangle className="w-8 h-8 text-red-500" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-black text-gray-800 uppercase tracking-tight">Confirmar Exclusão</h3>
+                      <p className="text-sm text-gray-500 mt-2">Tem certeza que deseja excluir permanentemente o registro de <span className="font-bold text-gray-700">{editingMember?.name}</span>?</p>
+                    </div>
+                    <div className="flex gap-4">
+                      <button 
+                        onClick={() => setIsDeleting(false)}
+                        disabled={isProcessing}
+                        className="flex-1 bg-gray-100 text-gray-600 py-4 rounded-2xl font-black text-sm uppercase tracking-widest active:scale-95 transition-all disabled:opacity-50"
+                      >
+                        Cancelar
+                      </button>
+                      <button 
+                        onClick={() => editingMember && deleteMember(editingMember.id)}
+                        disabled={isProcessing}
+                        className="flex-1 bg-red-500 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-red-500/20 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        {isProcessing ? (
+                          <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                        ) : null}
+                        {isProcessing ? 'Excluindo...' : 'Excluir'}
+                      </button>
+                    </div>
                   </div>
-                  
-                  {(!FUNCTIONS.includes(editForm.funcao) || editForm.funcao === 'OUTRAS') && (
-                    <input 
-                      type="text"
-                      placeholder="Especifique a função..."
-                      className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all mt-2"
-                      value={editForm.funcao === 'OUTRAS' ? '' : editForm.funcao}
-                      onChange={(e) => {
-                        setEditForm(prev => ({ ...prev, funcao: e.target.value }));
-                        saveMemberDetails(editingMember.id, { funcao: e.target.value });
-                      }}
-                    />
-                  )}
-                </div>
+                ) : (
+                  <>
+                    {error && (
+                      <div className="bg-red-50 border border-red-100 p-4 rounded-2xl flex items-center gap-3 mb-4">
+                        <AlertTriangle className="w-5 h-5 text-red-500 shrink-0" />
+                        <p className="text-xs text-red-600 font-bold">{error}</p>
+                      </div>
+                    )}
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nome Completo</label>
+                      <input 
+                        type="text"
+                        className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
+                        value={editForm.name}
+                        onChange={(e) => {
+                          const val = e.target.value.toUpperCase();
+                          setEditForm(prev => ({ ...prev, name: val }));
+                        }}
+                      />
+                    </div>
 
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nº de Curso</label>
-                  <input 
-                    type="text"
-                    className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
-                    value={editForm.code}
-                    onChange={(e) => {
-                      const val = e.target.value.toUpperCase();
-                      setEditForm(prev => ({ ...prev, code: val }));
-                    }}
-                  />
-                </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">RE</label>
+                        <input 
+                          type="text"
+                          className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
+                          value={editForm.re}
+                          onChange={(e) => {
+                            const val = e.target.value.toUpperCase();
+                            setEditForm(prev => ({ ...prev, re: val }));
+                          }}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nº de Curso</label>
+                        <input 
+                          type="text"
+                          className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
+                          value={editForm.code}
+                          onChange={(e) => {
+                            const val = e.target.value.toUpperCase();
+                            setEditForm(prev => ({ ...prev, code: val }));
+                          }}
+                        />
+                      </div>
+                    </div>
 
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Telefone (WhatsApp)</label>
-                  <div className="relative">
-                    <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                    <input 
-                      type="tel"
-                      placeholder="(00) 00000-0000"
-                      className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl pl-12 pr-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all"
-                      value={editForm.telefone}
-                      onChange={(e) => {
-                        setEditForm(prev => ({ ...prev, telefone: e.target.value }));
-                        saveMemberDetails(editingMember.id, { telefone: e.target.value });
-                      }}
-                    />
-                  </div>
-                </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Nome de Guerra</label>
+                      <input 
+                        type="text"
+                        placeholder="Ex: SILVA"
+                        className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all uppercase"
+                        value={editForm.warName}
+                        onChange={(e) => {
+                          const val = e.target.value.toUpperCase();
+                          setEditForm(prev => ({ ...prev, warName: val }));
+                        }}
+                      />
+                    </div>
 
-                <div className="flex gap-4">
-                  <button 
-                    onClick={() => setEditingMember(null)}
-                    className="flex-1 bg-[#F27D26] text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-orange-500/20 active:scale-95 transition-all"
-                  >
-                    Concluir
-                  </button>
-                  <button 
-                    onClick={() => {
-                      // Logic to delete the member
-                      setEditingMember(null);
-                    }}
-                    className="flex-1 bg-red-500 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-red-500/20 active:scale-95 transition-all"
-                  >
-                    Excluir
-                  </button>
-                </div>
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Função</label>
+                      <div className="relative">
+                        <select 
+                          className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all appearance-none"
+                          value={FUNCTIONS.includes(editForm.funcao) ? editForm.funcao : (editForm.funcao ? 'OUTRAS' : '')}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEditForm(prev => ({ ...prev, funcao: val }));
+                          }}
+                        >
+                          <option value="">Nenhuma</option>
+                          {FUNCTIONS.map(f => (
+                            <option key={f} value={f}>{f}</option>
+                          ))}
+                        </select>
+                        <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                      </div>
+                      
+                      {(!FUNCTIONS.includes(editForm.funcao) || editForm.funcao === 'OUTRAS') && (
+                        <input 
+                          type="text"
+                          placeholder="Especifique a função..."
+                          className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl px-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all mt-2"
+                          value={editForm.funcao === 'OUTRAS' ? '' : editForm.funcao}
+                          onChange={(e) => {
+                            setEditForm(prev => ({ ...prev, funcao: e.target.value }));
+                          }}
+                        />
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">Telefone (WhatsApp)</label>
+                      <div className="relative">
+                        <Phone className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                        <input 
+                          type="tel"
+                          placeholder="(00) 00000-0000"
+                          className="w-full bg-gray-50 border-2 border-gray-100 rounded-2xl pl-12 pr-4 py-3 font-bold text-sm outline-none focus:border-[#F27D26] transition-all"
+                          value={editForm.telefone}
+                          onChange={(e) => {
+                            setEditForm(prev => ({ ...prev, telefone: e.target.value }));
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex gap-4">
+                      <button 
+                        onClick={() => {
+                          if (isAddingMember) {
+                            addMember();
+                          } else {
+                            updateMember();
+                          }
+                        }}
+                        disabled={isProcessing}
+                        className="flex-1 bg-[#F27D26] text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-orange-500/20 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        {isProcessing ? (
+                          <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                        ) : null}
+                        {isAddingMember ? (isProcessing ? 'Adicionando...' : 'Adicionar') : (isProcessing ? 'Salvando...' : 'Concluir')}
+                      </button>
+                      {!isAddingMember && editingMember && (
+                        <button 
+                          onClick={() => setIsDeleting(true)}
+                          disabled={isProcessing}
+                          className="flex-1 bg-red-500 text-white py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg shadow-red-500/20 active:scale-95 transition-all disabled:opacity-50"
+                        >
+                          Excluir
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             </motion.div>
           </div>

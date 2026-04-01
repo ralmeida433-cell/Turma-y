@@ -14,10 +14,27 @@ service cloud.firestore {
              (!('telefone' in data) || data.telefone is string);
     }
 
+    function isValidMember(data) {
+      return data.keys().hasAll(['re', 'name', 'code']) &&
+             data.re is string &&
+             data.name is string &&
+             data.code is string &&
+             (!('warName' in data) || data.warName is string) &&
+             (!('role' in data) || data.role is string) &&
+             (!('phone' in data) || data.phone is string);
+    }
+
+    match /turmas/{turmaId}/members/{memberId} {
+      allow read: if true;
+      allow write: if isAuthenticated() && isValidMember(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
     match /turmas/{turmaId}/attendance/{memberId} {
       // Allow read and write for authenticated users
       allow read: if true; // Publicly readable for now
       allow write: if isAuthenticated() && isValidAttendance(request.resource.data);
+      allow delete: if isAuthenticated();
     }
   }
 }

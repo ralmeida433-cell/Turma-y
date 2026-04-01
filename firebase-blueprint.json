@@ -1,5 +1,20 @@
 {
   "entities": {
+    "MilitaryMember": {
+      "title": "Military Member",
+      "description": "Details of a military member in a turma",
+      "type": "object",
+      "properties": {
+        "re": { "type": "string" },
+        "name": { "type": "string" },
+        "warName": { "type": "string" },
+        "role": { "type": "string" },
+        "code": { "type": "string" },
+        "phone": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["re", "name", "code"]
+    },
     "Attendance": {
       "title": "Attendance",
       "description": "Presence status for a military member",
@@ -27,6 +42,10 @@
     }
   },
   "firestore": {
+    "/turmas/{turmaId}/members/{memberId}": {
+      "schema": "MilitaryMember",
+      "description": "List of military members in a turma"
+    },
     "/turmas/{turmaId}/attendance/{memberId}": {
       "schema": "Attendance",
       "description": "Collection of attendance records for each turma, indexed by member ID"
