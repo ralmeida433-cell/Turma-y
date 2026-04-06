@@ -119,17 +119,17 @@ export default function App() {
   useEffect(() => {
     if (editingMember) {
       setEditForm({
-        name: editingMember.name,
-        warName: presence[editingMember.id]?.warName || editingMember.warName || '',
-        funcao: presence[editingMember.id]?.funcao || editingMember.role || '',
-        code: editingMember.code,
-        telefone: presence[editingMember.id]?.telefone || editingMember.phone || '',
-        re: editingMember.re
+        name: String(editingMember.name || ''),
+        warName: String(presence[editingMember.id]?.warName || editingMember.warName || ''),
+        funcao: String(presence[editingMember.id]?.funcao || editingMember.role || ''),
+        code: String(editingMember.code || ''),
+        telefone: String(presence[editingMember.id]?.telefone || editingMember.phone || ''),
+        re: String(editingMember.re || '')
       });
     } else if (isAddingMember) {
       setEditForm({ name: '', warName: '', funcao: '', code: '', telefone: '', re: '' });
     }
-  }, [editingMember, isAddingMember]); // Only run when opening the modal
+  }, [editingMember, isAddingMember, presence]); // Only run when opening the modal
 
   const FUNCTIONS = [
     'P1', 'AUX DE P1', 'P2', 'AUX DE P2', 'P3', 'AUX DE P3', 
@@ -163,16 +163,24 @@ export default function App() {
     const checkMigration = async () => {
       try {
         const snapshot = await getDocs(collection(db, membersPath));
-        // Only migrate if Firestore is empty AND we haven't loaded anything yet
-        if (snapshot.empty) {
-          console.log("Migrating members to Firestore...");
-          for (const member of currentTurma.members) {
-            await setDoc(doc(db, membersPath, String(member.id)), {
-              ...member,
-              createdAt: serverTimestamp()
-            });
-          }
+        // Force migration to ensure Firestore matches turmas.ts exactly
+        console.log("Forcing migration of members to Firestore...");
+        
+        // 1. Add/Update all members from turmas.ts
+        for (const member of currentTurma.members) {
+          await setDoc(doc(db, membersPath, String(member.id)), {
+            ...member,
+            createdAt: serverTimestamp()
+          }, { merge: true });
         }
+        
+        // 2. Delete any extra members in Firestore that are not in turmas.ts
+        const currentIds = currentTurma.members.map(m => String(m.id));
+        snapshot.docs.forEach(async (docSnap) => {
+          if (!currentIds.includes(docSnap.id)) {
+            await deleteDoc(doc(db, membersPath, docSnap.id));
+          }
+        });
       } catch (err) {
         console.error("Migration error:", err);
       }
@@ -182,6 +190,8 @@ export default function App() {
 
     return () => unsubscribe();
   }, [isAuthReady, user, selectedTurmaId, currentTurma]);
+
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Initialize Auth
   useEffect(() => {
@@ -197,6 +207,9 @@ export default function App() {
   }, []);
 
   const handleLogin = async () => {
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
+    setError(null);
     const provider = new GoogleAuthProvider();
     // Add custom parameters to force account selection if needed
     provider.setCustomParameters({ prompt: 'select_account' });
@@ -216,6 +229,8 @@ export default function App() {
       } else {
         setError("Falha ao entrar. Tente abrir o app em uma nova aba se o erro persistir.");
       }
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
@@ -419,11 +434,16 @@ export default function App() {
 
   const filteredMembers = useMemo(() => {
     return MILITARY_MEMBERS.filter(member => {
-      const activeWarName = presence[member.id]?.warName || member.warName;
-      const matchesSearch = member.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                           activeWarName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                           member.re.includes(searchTerm) ||
-                           member.code.includes(searchTerm);
+      const safeName = String(member.name || '');
+      const activeWarName = String(presence[member.id]?.warName || member.warName || '');
+      const safeRe = String(member.re || '');
+      const safeCode = String(member.code || '');
+      const searchLower = searchTerm.toLowerCase();
+
+      const matchesSearch = safeName.toLowerCase().includes(searchLower) || 
+                           activeWarName.toLowerCase().includes(searchLower) ||
+                           safeRe.includes(searchTerm) ||
+                           safeCode.includes(searchTerm);
       
       const isPresent = presence[member.id]?.present;
       const matchesFilter = filter === 'all' || 
@@ -432,16 +452,20 @@ export default function App() {
       
       return matchesSearch && matchesFilter;
     });
-  }, [searchTerm, presence, filter]);
+  }, [searchTerm, presence, filter, MILITARY_MEMBERS]);
 
   const stats = useMemo(() => {
     const total = MILITARY_MEMBERS.length;
-    const values = Object.values(presence) as { present: boolean }[];
-    const presentCount = values.filter(p => p.present).length;
+    let presentCount = 0;
+    for (const member of MILITARY_MEMBERS) {
+      if (presence[member.id]?.present) {
+        presentCount++;
+      }
+    }
     const absentCount = total - presentCount;
-    const percentage = Math.round((presentCount / total) * 100);
+    const percentage = total === 0 ? 0 : Math.round((presentCount / total) * 100);
     return { total, presentCount, absentCount, percentage };
-  }, [presence]);
+  }, [presence, MILITARY_MEMBERS]);
 
   const copyToWhatsApp = async () => {
     const now = new Date();
@@ -450,7 +474,7 @@ export default function App() {
 
     const presentList = MILITARY_MEMBERS
       .filter(m => presence[m.id]?.present)
-      .sort((a, b) => Number(a.code) - Number(b.code))
+      .sort((a, b) => Number(a.code || 0) - Number(b.code || 0))
       .map((m, i) => {
         const p = presence[m.id];
         const role = p?.funcao || m.role;
@@ -470,7 +494,7 @@ export default function App() {
     
     const absentList = MILITARY_MEMBERS
       .filter(m => !presence[m.id]?.present)
-      .sort((a, b) => Number(a.code) - Number(b.code))
+      .sort((a, b) => Number(a.code || 0) - Number(b.code || 0))
       .map((m, i) => {
         const p = presence[m.id];
         const activeWarName = p?.warName || m.warName;
@@ -608,10 +632,15 @@ ${absentList || '_Nenhum militar ausente._'}
             
             <button 
               onClick={handleLogin}
-              className="w-full flex items-center justify-center gap-3 bg-white border-2 border-gray-200 hover:border-[#F27D26] text-gray-700 py-4 rounded-2xl font-black text-sm transition-all active:scale-95 shadow-sm"
+              disabled={isLoggingIn}
+              className="w-full flex items-center justify-center gap-3 bg-white border-2 border-gray-200 hover:border-[#F27D26] text-gray-700 py-4 rounded-2xl font-black text-sm transition-all active:scale-95 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="Google" />
-              Entrar com Google
+              {isLoggingIn ? (
+                <div className="w-5 h-5 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+              ) : (
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="Google" />
+              )}
+              {isLoggingIn ? 'Entrando...' : 'Entrar com Google'}
             </button>
             
             <p className="mt-8 text-[10px] text-gray-400 font-bold uppercase tracking-widest">Estado Maior Turma Y</p>
@@ -783,10 +812,11 @@ ${absentList || '_Nenhum militar ausente._'}
                         presence[member.id]?.present ? "text-green-900" : "text-gray-800"
                       )}>
                         {(() => {
-                          const activeWarName = presence[member.id]?.warName || member.warName;
-                          if (!activeWarName) return <span>{member.name}</span>;
+                          const activeWarName = String(presence[member.id]?.warName || member.warName || '');
+                          const safeName = String(member.name || '');
+                          if (!activeWarName) return <span>{safeName}</span>;
                           
-                          const parts = member.name.split(new RegExp(`(${activeWarName})`, 'gi'));
+                          const parts = safeName.split(new RegExp(`(${activeWarName})`, 'gi'));
                           return parts.map((part, i) => 
                             part.toLowerCase() === activeWarName.toLowerCase() ? (
                               <span key={i} className="font-black text-[#F27D26]">{part}</span>
